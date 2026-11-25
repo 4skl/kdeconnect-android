@@ -187,6 +187,10 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
 
     <string name="mouse_keyboard_receiver_service_description">Receive remote mouse movement and Keyboard input</string>
 
+    <string name="start_screen_share">Screen share</string>
+    <string name="screen_share_description">Shared desktop screen</string>
+    <string name="switch_screen">Switch screen</string>
+
     <string name="view_status_title">Status</string>
     <string name="battery_status_format">Battery: %d%%</string>
     <string name="battery_status_low_format">Battery: %d%% Low Battery</string>
@@ -676,4 +680,5 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
     <string name="pref_mpris_volume_control_summary">Control the connected device\'s media volume using this phone\'s hardware buttons</string>
 
     <string name="pref_notification_screen_off_key" translatable="false">pref_notification_screen_off</string>
+    <string name="screen_share">Screen Share</string>
 </resources>

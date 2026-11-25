@@ -63,13 +63,14 @@ class MousePadActivity :
     private var accumulatedDistanceY: Double = 0.0
     private var pendingShowKeyboard: Boolean = false
     private var keyboardShown: Boolean = false
+    private var isScreenSharing: Boolean = false
 
     private lateinit var mDetector: GestureDetector
     private var mSensorManager: SensorManager? = null
     private lateinit var mMousePadGestureDetector: MousePadGestureDetector
     private lateinit var mPointerAccelerationProfile: PointerAccelerationProfile
 
-    private val mouseDelta = PointerAccelerationProfile.MouseDelta() // to be reused on every touch move event
+    private val mouseDelta = PointerAccelerationProfile.MouseDelta()
 
     private lateinit var keyListenerView: KeyListenerView
 
@@ -139,6 +140,16 @@ class MousePadActivity :
         binding.root.addDeviceDisconnectedOverlay(plugin.device)
         supportActionBar?.subtitle = plugin.device.name
 
+        plugin.setScreenShareActivityCallback { bitmap ->
+            runOnUiThread {
+                if (isScreenSharing) {
+                    binding.mousepadInfo.visibility = View.GONE
+                    binding.screenDisplay.visibility = View.VISIBLE
+                    binding.screenDisplay.setImageBitmap(bitmap)
+                }
+            }
+        }
+
         window.decorView.isHapticFeedbackEnabled = true
 
         mDetector = GestureDetector(this, this)
@@ -154,8 +165,6 @@ class MousePadActivity :
 
         applyPrefs()
 
-        // Technically xdpi and ydpi should be handled separately,
-        // but since ydpi is usually almost equal to xdpi, only xdpi is used for the multiplier.
         displayDpiMultiplier = STANDARD_DPI / resources.displayMetrics.xdpi
 
         val decorView = window.decorView
@@ -213,6 +222,11 @@ class MousePadActivity :
 
     override fun onDestroy() {
         if (::plugin.isInitialized) {
+            plugin.clearScreenShareActivityCallback()
+            if (isScreenSharing) {
+                plugin.stopScreenShare()
+                isScreenSharing = false
+            }
             plugin.preferences.unregisterOnSharedPreferenceChangeListener(this)
         }
         super.onDestroy()
@@ -229,11 +243,28 @@ class MousePadActivity :
 
         menu.findItem(R.id.menu_right_click).isVisible = !mouseButtonsEnabled
         menu.findItem(R.id.menu_middle_click).isVisible = !mouseButtonsEnabled
+
+        menu.add(Menu.NONE, MENU_ID_SCREEN_SHARE, Menu.NONE, R.string.screen_share)
+            .setIcon(R.drawable.screen_share_24px)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+
+        menu.add(Menu.NONE, MENU_ID_SWITCH_SCREEN, Menu.NONE, R.string.switch_screen)
+            .setVisible(isScreenSharing)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
+
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            MENU_ID_SCREEN_SHARE -> {
+                toggleScreenShare()
+                true
+            }
+            MENU_ID_SWITCH_SCREEN -> {
+                plugin.switchScreen()
+                true
+            }
             R.id.menu_right_click -> {
                 sendRightClick()
                 true
@@ -267,6 +298,22 @@ class MousePadActivity :
         }
     }
 
+    private fun toggleScreenShare() {
+        if (isScreenSharing) {
+            isScreenSharing = false
+            plugin.stopScreenShare()
+            binding.screenDisplay.setImageBitmap(null)
+            binding.screenDisplay.visibility = View.GONE
+            binding.mousepadInfo.visibility = View.VISIBLE
+        } else {
+            isScreenSharing = true
+            binding.mousepadInfo.visibility = View.GONE
+            binding.screenDisplay.visibility = View.VISIBLE
+            plugin.startScreenShare()
+        }
+        invalidateOptionsMenu()
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (mMousePadGestureDetector.onTouchEvent(event)) {
             return true
@@ -284,7 +331,6 @@ class MousePadActivity :
                 return false
             }
         }
-
 
         when (actionType) {
             MotionEvent.ACTION_DOWN -> {
@@ -307,7 +353,6 @@ class MousePadActivity :
                         plugin.sendSingleHold()
                     }
                 } else {
-                    // Run the mouse delta through the pointer acceleration profile
                     mPointerAccelerationProfile.touchMoved(deltaX, deltaY, event.eventTime)
                     mPointerAccelerationProfile.commitAcceleratedMouseDelta(mouseDelta)
 
@@ -330,9 +375,7 @@ class MousePadActivity :
 
     override fun onDown(e: MotionEvent): Boolean = false
 
-    override fun onShowPress(e: MotionEvent) {
-        // From GestureDetector, left empty
-    }
+    override fun onShowPress(e: MotionEvent) {}
 
     override fun onSingleTapUp(e: MotionEvent): Boolean = false
 
@@ -355,7 +398,6 @@ class MousePadActivity :
     }
 
     override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
-        // If only one thumb is used then cancel the scroll gesture
         if (e2.pointerCount <= 1) {
             return false
         }
@@ -368,8 +410,6 @@ class MousePadActivity :
         val absX = abs(filteredDistanceX)
         val absY = abs(filteredDistanceY)
 
-        // Suppress minor perpendicular motion near either axis while preserving
-        // deliberate diagonal scrolling.
         if (absX < absY * DIRECTION_LOCK_RATIO) {
             filteredDistanceX = 0f
         } else if (absY < absX * DIRECTION_LOCK_RATIO) {
@@ -422,8 +462,6 @@ class MousePadActivity :
 
     override fun onDoubleTapEvent(e: MotionEvent): Boolean {
         if (e.action == MotionEvent.ACTION_UP && maybeDragging) {
-            // Make sure we pass the event on to the general motion event handler which takes
-            // care of ending an eventual drag.
             return false
         }
         return true
@@ -456,7 +494,7 @@ class MousePadActivity :
     override fun onApplyWindowInsets(v: View, insets: WindowInsetsCompat): WindowInsetsCompat {
         val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
         keyboardShown = imeInsets.bottom != 0 || imeInsets.top != 0 ||
-            imeInsets.left != 0 || imeInsets.right != 0
+                imeInsets.left != 0 || imeInsets.right != 0
         return ViewCompat.onApplyWindowInsets(v, insets)
     }
 
@@ -570,7 +608,6 @@ class MousePadActivity :
             if (hasWindowFocus()) {
                 showKeyboard()
             } else {
-                // Defer until the window gains focus, see pendingShowKeyboard.
                 pendingShowKeyboard = true
             }
         } else {
@@ -605,9 +642,12 @@ class MousePadActivity :
     companion object {
         const val EXTRA_DEVICE_ID = "deviceId"
 
-        private const val MIN_DISTANCE_TO_SEND_SCROLL = 2.5f // touch gesture scroll
+        private const val MENU_ID_SCREEN_SHARE = 1001
+        private const val MENU_ID_SWITCH_SCREEN = 1002
+
+        private const val MIN_DISTANCE_TO_SEND_SCROLL = 2.5f
         private const val DIRECTION_LOCK_RATIO = 0.5f
-        private const val STANDARD_DPI = 240.0f // = hdpi
-        private const val MIN_DRAGGING_DISTANCE_SQUARED = 25.0f // distance squared to move after a double tap to start dragging
+        private const val STANDARD_DPI = 240.0f
+        private const val MIN_DRAGGING_DISTANCE_SQUARED = 25.0f
     }
 }
