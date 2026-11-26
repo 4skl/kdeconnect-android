@@ -10,6 +10,8 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.Log
 import android.view.KeyEvent
@@ -19,13 +21,44 @@ import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory.LoadablePlugin
 import org.kde.kdeconnect.ui.PluginSettingsFragment
 import org.kde.kdeconnect_tp.R
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 @LoadablePlugin
 class MousePadPlugin : Plugin() {
     var isKeyboardEnabled: Boolean = true
         private set
 
-    private var screenShareActivityCallback: ((Bitmap) -> Unit)? = null
+    private var screenShareFrameCallback: ((Bitmap) -> Unit)? = null
+    private var screenShareStateCallback: ((Boolean) -> Unit)? = null
+
+    private val decodeExecutor = Executors.newSingleThreadExecutor()
+    private val latestFramePacket = AtomicReference<NetworkPacket?>(null)
+    private val isDecoding = AtomicBoolean(false)
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var pendingDx: Float = 0f
+    private var pendingDy: Float = 0f
+    private var pendingInMm: Boolean = false
+    private var deltaFlushScheduled: Boolean = false
+
+    private val flushDeltaRunnable = Runnable {
+        deltaFlushScheduled = false
+        val dx = pendingDx
+        val dy = pendingDy
+        val inMm = pendingInMm
+        pendingDx = 0f
+        pendingDy = 0f
+
+        if ((dx != 0f || dy != 0f) && device.isReachable) {
+            val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
+            np["dx"] = dx.toDouble()
+            np["dy"] = dy.toDouble()
+            if (inMm) np["deltaInMm"] = true
+            sendPacket(np)
+        }
+    }
 
     override fun onPacketReceived(np: NetworkPacket): Boolean {
         if (np.type == PACKET_TYPE_SCREENSHARE) {
@@ -38,47 +71,119 @@ class MousePadPlugin : Plugin() {
     }
 
     private fun handleScreenSharePacket(packet: NetworkPacket) {
-        if (packet.contains("screenData")) {
-            val screenData = packet.getString("screenData")
-            if (!screenData.isNullOrEmpty()) {
+        if (packet.getBoolean("stopScreenShare", false)) {
+            mainHandler.post { screenShareStateCallback?.invoke(false) }
+            return
+        }
+        if (packet.getBoolean("startScreenShare", false)) {
+            mainHandler.post { screenShareStateCallback?.invoke(true) }
+            if (!packet.contains("screenData") && packet.payload == null) return
+        }
+
+        if (screenShareFrameCallback == null) return
+
+        latestFramePacket.set(packet)
+        if (isDecoding.compareAndSet(false, true)) {
+            decodeExecutor.execute(::drainDecodeLoop)
+        }
+    }
+
+    private fun drainDecodeLoop() {
+        try {
+            while (true) {
+                val packet = latestFramePacket.getAndSet(null) ?: break
+                if (screenShareFrameCallback == null) continue
+
                 try {
-                    val imageData = Base64.decode(screenData, Base64.DEFAULT)
-                    val bitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
-                    if (bitmap != null) {
-                        screenShareActivityCallback?.invoke(bitmap)
-                    } else {
-                        Log.w("MousePadPlugin", "Decoded screenData bitmap was null")
+                    val inlineStream = packet.payload?.inputStream
+                    val inlineB64 = if (packet.contains("screenData")) packet.getString("screenData") else null
+
+                    val bytes: ByteArray? = when {
+                        inlineStream != null -> inlineStream.use { it.readBytes() }
+                        !inlineB64.isNullOrEmpty() -> Base64.decode(inlineB64, Base64.DEFAULT)
+                        else -> null
+                    }
+
+                    if (bytes != null && bytes.isNotEmpty()) {
+                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bitmap != null) {
+                            mainHandler.post {
+                                screenShareFrameCallback?.invoke(bitmap)
+                            }
+                        }
                     }
                 } catch (e: Exception) {
-                    Log.e("MousePadPlugin", "Error decoding screen data", e)
+                    Log.e("MousePadPlugin", "Error decoding screen frame", e)
                 }
+            }
+        } finally {
+            isDecoding.set(false)
+            if (latestFramePacket.get() != null && isDecoding.compareAndSet(false, true)) {
+                decodeExecutor.execute(::drainDecodeLoop)
             }
         }
     }
 
-    fun setScreenShareActivityCallback(callback: (Bitmap) -> Unit) {
-        this.screenShareActivityCallback = callback
+    fun setScreenShareCallbacks(
+        onFrame: (Bitmap) -> Unit,
+        onStateChanged: (Boolean) -> Unit
+    ) {
+        this.screenShareFrameCallback = onFrame
+        this.screenShareStateCallback = onStateChanged
     }
 
-    fun clearScreenShareActivityCallback() {
-        this.screenShareActivityCallback = null
+    fun clearScreenShareCallbacks() {
+        this.screenShareFrameCallback = null
+        this.screenShareStateCallback = null
+        this.latestFramePacket.set(null)
     }
 
-    fun startScreenShare() {
+    fun startScreenShare(
+        viewWidthMm: Float,
+        viewHeightMm: Float,
+        viewWidthPx: Int,
+        viewHeightPx: Int
+    ) {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["startScreenShare"] = true
+        np["viewWidthMm"] = viewWidthMm.toDouble()
+        np["viewHeightMm"] = viewHeightMm.toDouble()
+        np["viewWidthPx"] = viewWidthPx
+        np["viewHeightPx"] = viewHeightPx
+        sendPacket(np)
+    }
+
+    fun sendScreenShareViewport(
+        viewWidthMm: Float,
+        viewHeightMm: Float,
+        viewWidthPx: Int,
+        viewHeightPx: Int
+    ) {
+        if (!device.isReachable) return
+        val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
+        np["viewWidthMm"] = viewWidthMm.toDouble()
+        np["viewHeightMm"] = viewHeightMm.toDouble()
+        np["viewWidthPx"] = viewWidthPx
+        np["viewHeightPx"] = viewHeightPx
         sendPacket(np)
     }
 
     fun stopScreenShare() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["stopScreenShare"] = true
         sendPacket(np)
     }
 
-    fun switchScreen() {
+    fun switchScreen(viewWidthMm: Float, viewHeightMm: Float, viewWidthPx: Int, viewHeightPx: Int) {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["switchScreen"] = true
+        np["viewWidthMm"] = viewWidthMm.toDouble()
+        np["viewHeightMm"] = viewHeightMm.toDouble()
+        np["viewWidthPx"] = viewWidthPx
+        np["viewHeightPx"] = viewHeightPx
         sendPacket(np)
     }
 
@@ -118,9 +223,7 @@ class MousePadPlugin : Plugin() {
         get() = context.getString(R.string.pref_plugin_mousepad_desc_nontv)
 
     override val hasSettings: Boolean = true
-
     override val keepAliveWhenUnreachable: Boolean = true
-
     override val settingsScope = SettingsScope.APP_WIDE
 
     override fun getSettingsFragment(activity: Activity): PluginSettingsFragment {
@@ -133,10 +236,26 @@ class MousePadPlugin : Plugin() {
 
     fun sendMouseDelta(dx: Float, dy: Float) {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["dx"] = dx.toDouble()
-        np["dy"] = dy.toDouble()
-        sendPacket(np)
+        if (pendingInMm) flushDeltaRunnable.run()
+        pendingInMm = false
+        pendingDx += dx
+        pendingDy += dy
+        if (!deltaFlushScheduled) {
+            deltaFlushScheduled = true
+            mainHandler.postDelayed(flushDeltaRunnable, 16L)
+        }
+    }
+
+    fun sendMouseDeltaMm(dxMm: Float, dyMm: Float) {
+        if (!device.isReachable) return
+        if (!pendingInMm && (pendingDx != 0f || pendingDy != 0f)) flushDeltaRunnable.run()
+        pendingInMm = true
+        pendingDx += dxMm
+        pendingDy += dyMm
+        if (!deltaFlushScheduled) {
+            deltaFlushScheduled = true
+            mainHandler.postDelayed(flushDeltaRunnable, 16L)
+        }
     }
 
     fun hasMicPermission(): Boolean {
@@ -144,36 +263,42 @@ class MousePadPlugin : Plugin() {
     }
 
     fun sendLeftClick() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["singleclick"] = true
         sendPacket(np)
     }
 
     fun sendDoubleClick() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["doubleclick"] = true
         sendPacket(np)
     }
 
     fun sendMiddleClick() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["middleclick"] = true
         sendPacket(np)
     }
 
     fun sendRightClick() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["rightclick"] = true
         sendPacket(np)
     }
 
     fun sendSingleHold() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["singlehold"] = true
         sendPacket(np)
     }
 
     fun sendSingleRelease() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["singlerelease"] = true
         sendPacket(np)
@@ -189,36 +314,42 @@ class MousePadPlugin : Plugin() {
     }
 
     fun sendLeft() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_DPAD_LEFT)
         sendPacket(np)
     }
 
     fun sendRight() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_DPAD_RIGHT)
         sendPacket(np)
     }
 
     fun sendUp() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_DPAD_UP)
         sendPacket(np)
     }
 
     fun sendDown() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_DPAD_DOWN)
         sendPacket(np)
     }
 
     fun sendSelect() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_ENTER)
         sendPacket(np)
     }
 
     fun sendHome() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["super"] = true
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_META_LEFT)
@@ -226,12 +357,14 @@ class MousePadPlugin : Plugin() {
     }
 
     fun sendBack() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_ESCAPE)
         device.sendPacket(np)
     }
 
     fun sendClose() {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["alt"] = true
         np["specialKey"] = KeyListenerView.SpecialKeysMap.get(KeyEvent.KEYCODE_F4)
@@ -239,12 +372,14 @@ class MousePadPlugin : Plugin() {
     }
 
     fun sendText(content: String) {
+        if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
         np["key"] = content
         sendPacket(np)
     }
 
     fun sendPacket(np: NetworkPacket) {
+        if (!device.isReachable) return
         device.sendPacket(np)
     }
 
