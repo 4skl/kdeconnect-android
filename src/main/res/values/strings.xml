@@ -563,6 +563,65 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
       <item>light</item>
       <item>dark</item>
     </string-array>
+
+    <!-- Screen share resolution options -->
+    <string-array name="screen_share_resolution_entries">
+        <item>320x240</item>
+        <item>640x480</item>
+        <item>800x600</item>
+        <item>1024x768</item>
+        <item>1280x720</item>
+        <item>1920x1080</item>
+    </string-array>
+    <string-array name="screen_share_resolution_values" translatable="false">
+        <item>320x240</item>
+        <item>640x480</item>
+        <item>800x600</item>
+        <item>1024x768</item>
+        <item>1280x720</item>
+        <item>1920x1080</item>
+    </string-array>
+
+    <!-- Screen share quality options -->
+    <string-array name="screen_share_quality_entries">
+        <item>Low</item>
+        <item>Medium</item>
+        <item>High</item>
+        <item>Best</item>
+    </string-array>
+    <string-array name="screen_share_quality_values" translatable="false">
+        <item>low</item>
+        <item>medium</item>
+        <item>high</item>
+        <item>best</item>
+    </string-array>
+
+    <!-- Screen share framerate options -->
+    <string-array name="screen_share_fps_entries">
+        <item>15 FPS</item>
+        <item>30 FPS</item>
+        <item>60 FPS</item>
+    </string-array>
+    <string-array name="screen_share_fps_values" translatable="false">
+        <item>15</item>
+        <item>30</item>
+        <item>60</item>
+    </string-array>
+
+    <!-- Screen share bitrate options -->
+    <string-array name="screen_share_bitrate_entries">
+        <item>1000 Kbps</item>
+        <item>2500 Kbps</item>
+        <item>5000 Kbps</item>
+        <item>10000 Kbps</item>
+    </string-array>
+    <string-array name="screen_share_bitrate_values" translatable="false">
+        <item>1000</item>
+        <item>2500</item>
+        <item>5000</item>
+        <item>10000</item>
+    </string-array>
+
     <string name="report_bug">Report Bug</string>
     <string name="donate">Donate</string>
     <string name="source_code">Source Code</string>
@@ -681,4 +740,20 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
 
     <string name="pref_notification_screen_off_key" translatable="false">pref_notification_screen_off</string>
     <string name="screen_share">Screen Share</string>
+
+    <!-- Screen share settings -->
+    <string name="screen_share_settings_title">Screen Share Settings</string>
+    <string name="screen_share_resolution_title">Screen Share Resolution</string>
+    <string name="screen_share_quality_title">Screen Share Quality</string>
+    <string name="screen_share_fps_title">Screen Share Framerate</string>
+    <string name="screen_share_bitrate_title">Screen Share Bitrate</string>
+    <string name="screen_share_default_resolution">640x480</string>
+    <string name="screen_share_default_quality">medium</string>
+    <string name="screen_share_default_fps" translatable="false">30</string>
+    <string name="screen_share_default_bitrate" translatable="false">2500</string>
+    <string name="screen_share_pref_category" translatable="false">screen_share_pref_category</string>
+    <string name="screen_share_resolution_key" translatable="false">screen_share_resolution_key</string>
+    <string name="screen_share_quality_key" translatable="false">screen_share_quality_key</string>
+    <string name="screen_share_fps_key" translatable="false">screen_share_fps_key</string>
+    <string name="screen_share_bitrate_key" translatable="false">screen_share_bitrate_key</string>
 </resources>

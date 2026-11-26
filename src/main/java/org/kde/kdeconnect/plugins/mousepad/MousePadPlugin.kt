@@ -213,6 +213,27 @@ class MousePadPlugin : Plugin() {
         np["viewHeightMm"] = viewHeightMm.toDouble()
         np["viewWidthPx"] = viewWidthPx
         np["viewHeightPx"] = viewHeightPx
+        
+        // Use actual display dimensions for resolution
+        np["width"] = viewWidthPx
+        np["height"] = viewHeightPx
+        
+        // Read screen share settings from preferences
+        val quality = preferences.getString(context.getString(R.string.screen_share_quality_key), "medium")
+        val fps = preferences.getString(context.getString(R.string.screen_share_fps_key), "30")
+        
+        // Set quality level
+        quality?.let { qual ->
+            when (qual) {
+                "low" -> np["quality"] = "low"
+                "high" -> np["quality"] = "high"
+                else -> np["quality"] = "medium"
+            }
+        }
+        
+        // Set FPS
+        fps?.let { np["fps"] = it }
+        
         sendPacket(np)
     }
 

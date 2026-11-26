@@ -129,4 +129,29 @@ SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted
         android:key="@string/pref_mousepad_show_keyboard"
         android:title="@string/mousepad_show_keyboard"
         />
+
+    <org.kde.kdeconnect.helpers.LongSummaryPreferenceCategory
+        android:key="@string/screen_share_pref_category"
+        android:title="@string/screen_share_settings_title">
+
+        <ListPreference
+            android:id="@+id/mousepad_screen_share_quality_preference"
+            android:defaultValue="@string/screen_share_default_quality"
+            android:entries="@array/screen_share_quality_entries"
+            android:entryValues="@array/screen_share_quality_values"
+            android:key="@string/screen_share_quality_key"
+            android:summary="%s"
+            android:title="@string/screen_share_quality_title" />
+
+        <ListPreference
+            android:id="@+id/mousepad_screen_share_fps_preference"
+            android:defaultValue="@string/screen_share_default_fps"
+            android:entries="@array/screen_share_fps_entries"
+            android:entryValues="@array/screen_share_fps_values"
+            android:key="@string/screen_share_fps_key"
+            android:summary="%s"
+            android:title="@string/screen_share_fps_title" />
+
+    </org.kde.kdeconnect.helpers.LongSummaryPreferenceCategory>
+
 </PreferenceScreen>
