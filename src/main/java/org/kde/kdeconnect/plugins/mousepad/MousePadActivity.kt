@@ -18,9 +18,9 @@ import android.view.HapticFeedbackConstants
 import android.view.Menu
 import android.view.MenuItem
 import android.view.MotionEvent
+import android.view.SurfaceHolder
 import android.view.View
 import android.view.inputmethod.InputMethodManager
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.core.content.getSystemService
 import androidx.core.view.OnApplyWindowInsetsListener
@@ -135,8 +135,6 @@ class MousePadActivity :
         mmPerPxX = MM_PER_INCH / safeXdpi
         mmPerPxY = MM_PER_INCH / safeYdpi
 
-        binding.screenDisplay.scaleType = ImageView.ScaleType.FIT_XY
-
         binding.screenDisplay.addOnLayoutChangeListener { _, left, top, right, bottom, oldL, oldT, oldR, oldB ->
             val w = right - left
             val h = bottom - top
@@ -150,21 +148,22 @@ class MousePadActivity :
             }
         }
 
-        plugin.setScreenShareCallbacks(
-            onFrame = { bitmap ->
-                if (isScreenSharing && !isFinishing && !isDestroyed) {
-                    binding.mousepadInfo.visibility = View.GONE
-                    binding.screenDisplay.visibility = View.VISIBLE
-                    binding.screenDisplay.setImageBitmap(bitmap)
-                }
-            },
-            onStateChanged = { active ->
-                if (isFinishing || isDestroyed) return@setScreenShareCallbacks
-                if (isScreenSharing != active) {
-                    setScreenSharingUiState(active)
-                }
+        binding.screenDisplay.holder.addCallback(object : SurfaceHolder.Callback {
+            override fun surfaceCreated(holder: SurfaceHolder) {
+                plugin.setRenderSurface(holder.surface)
             }
-        )
+            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                plugin.setRenderSurface(null)
+            }
+        })
+
+        plugin.setScreenShareCallbacks { active ->
+            if (isFinishing || isDestroyed) return@setScreenShareCallbacks
+            if (isScreenSharing != active) {
+                setScreenSharingUiState(active)
+            }
+        }
 
         window.decorView.isHapticFeedbackEnabled = true
 
@@ -210,7 +209,6 @@ class MousePadActivity :
             binding.mousepadInfo.visibility = View.GONE
             binding.screenDisplay.visibility = View.VISIBLE
         } else {
-            binding.screenDisplay.setImageBitmap(null)
             binding.screenDisplay.visibility = View.GONE
             binding.mousepadInfo.visibility = View.VISIBLE
         }

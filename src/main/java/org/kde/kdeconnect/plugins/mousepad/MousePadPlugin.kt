@@ -8,40 +8,51 @@ package org.kde.kdeconnect.plugins.mousepad
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.media.MediaCodec
+import android.media.MediaFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
 import android.view.KeyEvent
+import android.view.Surface
 import org.kde.kdeconnect.DeviceType
 import org.kde.kdeconnect.NetworkPacket
 import org.kde.kdeconnect.plugins.Plugin
 import org.kde.kdeconnect.plugins.PluginFactory.LoadablePlugin
 import org.kde.kdeconnect.ui.PluginSettingsFragment
 import org.kde.kdeconnect_tp.R
-import java.util.concurrent.Executors
+import java.io.DataInputStream
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 @LoadablePlugin
 class MousePadPlugin : Plugin() {
     var isKeyboardEnabled: Boolean = true
         private set
 
-    private var screenShareFrameCallback: ((Bitmap) -> Unit)? = null
     private var screenShareStateCallback: ((Boolean) -> Unit)? = null
+    private var renderSurface: Surface? = null
+    private var pendingStreamConfig: StreamConfig? = null
 
-    private val decodeExecutor = Executors.newSingleThreadExecutor()
-    private val latestFramePacket = AtomicReference<NetworkPacket?>(null)
-    private val isDecoding = AtomicBoolean(false)
+    private val streamRunning = AtomicBoolean(false)
+    private var streamThread: Thread? = null
+    private var activeSocket: Socket? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var pendingDx: Float = 0f
     private var pendingDy: Float = 0f
     private var pendingInMm: Boolean = false
     private var deltaFlushScheduled: Boolean = false
+
+    private data class StreamConfig(
+        val host: String,
+        val port: Int,
+        val width: Int,
+        val height: Int
+    )
 
     private val flushDeltaRunnable = Runnable {
         deltaFlushScheduled = false
@@ -65,85 +76,136 @@ class MousePadPlugin : Plugin() {
             handleScreenSharePacket(np)
             return true
         }
-
         this.isKeyboardEnabled = np.getBoolean("state", true)
         return true
     }
 
     private fun handleScreenSharePacket(packet: NetworkPacket) {
         if (packet.getBoolean("stopScreenShare", false)) {
+            stopStreamDecoder()
             mainHandler.post { screenShareStateCallback?.invoke(false) }
             return
         }
+
         if (packet.getBoolean("startScreenShare", false)) {
             mainHandler.post { screenShareStateCallback?.invoke(true) }
-            if (!packet.contains("screenData") && packet.payload == null) return
-        }
 
-        if (screenShareFrameCallback == null) return
+            val host = packet.getString("streamHost", "")
+            val port = packet.getInt("streamPort", 0)
+            val width = packet.getInt("width", 640)
+            val height = packet.getInt("height", 480)
 
-        latestFramePacket.set(packet)
-        if (isDecoding.compareAndSet(false, true)) {
-            decodeExecutor.execute(::drainDecodeLoop)
-        }
-    }
-
-    private fun drainDecodeLoop() {
-        try {
-            while (true) {
-                val packet = latestFramePacket.getAndSet(null) ?: break
-                if (screenShareFrameCallback == null) continue
-
-                try {
-                    val inlineStream = packet.payload?.inputStream
-                    val inlineB64 = if (packet.contains("screenData")) packet.getString("screenData") else null
-
-                    val bytes: ByteArray? = when {
-                        inlineStream != null -> inlineStream.use { it.readBytes() }
-                        !inlineB64.isNullOrEmpty() -> Base64.decode(inlineB64, Base64.DEFAULT)
-                        else -> null
-                    }
-
-                    if (bytes != null && bytes.isNotEmpty()) {
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bitmap != null) {
-                            mainHandler.post {
-                                screenShareFrameCallback?.invoke(bitmap)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e("MousePadPlugin", "Error decoding screen frame", e)
+            if (host.isNotEmpty() && port > 0) {
+                val cfg = StreamConfig(host, port, width, height)
+                pendingStreamConfig = cfg
+                renderSurface?.let { surface ->
+                    if (surface.isValid) startStreamDecoder(cfg, surface)
                 }
             }
-        } finally {
-            isDecoding.set(false)
-            if (latestFramePacket.get() != null && isDecoding.compareAndSet(false, true)) {
-                decodeExecutor.execute(::drainDecodeLoop)
-            }
         }
     }
 
-    fun setScreenShareCallbacks(
-        onFrame: (Bitmap) -> Unit,
-        onStateChanged: (Boolean) -> Unit
-    ) {
-        this.screenShareFrameCallback = onFrame
+    fun setScreenShareCallbacks(onStateChanged: (Boolean) -> Unit) {
         this.screenShareStateCallback = onStateChanged
     }
 
-    fun clearScreenShareCallbacks() {
-        this.screenShareFrameCallback = null
-        this.screenShareStateCallback = null
-        this.latestFramePacket.set(null)
+    fun setRenderSurface(surface: Surface?) {
+        this.renderSurface = surface
+        if (surface != null && surface.isValid) {
+            pendingStreamConfig?.let { startStreamDecoder(it, surface) }
+        } else {
+            stopStreamDecoder()
+        }
     }
 
-    fun startScreenShare(
-        viewWidthMm: Float,
-        viewHeightMm: Float,
-        viewWidthPx: Int,
-        viewHeightPx: Int
-    ) {
+    fun clearScreenShareCallbacks() {
+        this.screenShareStateCallback = null
+        this.renderSurface = null
+        this.pendingStreamConfig = null
+        stopStreamDecoder()
+    }
+
+    private fun startStreamDecoder(cfg: StreamConfig, surface: Surface) {
+        stopStreamDecoder()
+        streamRunning.set(true)
+
+        streamThread = Thread({
+            var socket: Socket? = null
+            var codec: MediaCodec? = null
+            try {
+                socket = Socket().apply {
+                    tcpNoDelay = true
+                    connect(InetSocketAddress(cfg.host, cfg.port), 3000)
+                }
+                activeSocket = socket
+
+                val format = MediaFormat.createVideoFormat(
+                    MediaFormat.MIMETYPE_VIDEO_AVC,
+                    cfg.width,
+                    cfg.height
+                ).apply {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                    }
+                }
+
+                codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                codec.configure(format, surface, null, 0)
+                codec.start()
+
+                val dis = DataInputStream(socket.getInputStream())
+                val bufferInfo = MediaCodec.BufferInfo()
+
+                while (streamRunning.get()) {
+                    val frameLen = dis.readInt()
+                    if (frameLen <= 0 || frameLen > 2_000_000) break
+
+                    val frameBytes = ByteArray(frameLen)
+                    dis.readFully(frameBytes)
+
+                    var queued = false
+                    while (streamRunning.get() && !queued) {
+                        val inIdx = codec.dequeueInputBuffer(5_000)
+                        if (inIdx >= 0) {
+                            codec.getInputBuffer(inIdx)?.apply {
+                                clear()
+                                put(frameBytes)
+                            }
+                            codec.queueInputBuffer(inIdx, 0, frameLen, System.nanoTime() / 1000L, 0)
+                            queued = true
+                        }
+                        while (true) {
+                            val outIdx = codec.dequeueOutputBuffer(bufferInfo, 0)
+                            if (outIdx >= 0) {
+                                codec.releaseOutputBuffer(outIdx, true)
+                            } else {
+                                break
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (streamRunning.get()) {
+                    Log.e("MousePadPlugin", "H264 stream error", e)
+                }
+            } finally {
+                try { codec?.stop() } catch (_: Exception) {}
+                try { codec?.release() } catch (_: Exception) {}
+                try { socket?.close() } catch (_: Exception) {}
+                if (activeSocket === socket) activeSocket = null
+            }
+        }, "ScreenShareH264Decoder").apply { start() }
+    }
+
+    private fun stopStreamDecoder() {
+        streamRunning.set(false)
+        try { activeSocket?.close() } catch (_: Exception) {}
+        activeSocket = null
+        streamThread?.interrupt()
+        streamThread = null
+    }
+
+    fun startScreenShare(viewWidthMm: Float, viewHeightMm: Float, viewWidthPx: Int, viewHeightPx: Int) {
         if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["startScreenShare"] = true
@@ -154,22 +216,9 @@ class MousePadPlugin : Plugin() {
         sendPacket(np)
     }
 
-    fun sendScreenShareViewport(
-        viewWidthMm: Float,
-        viewHeightMm: Float,
-        viewWidthPx: Int,
-        viewHeightPx: Int
-    ) {
-        if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
-        np["viewWidthMm"] = viewWidthMm.toDouble()
-        np["viewHeightMm"] = viewHeightMm.toDouble()
-        np["viewWidthPx"] = viewWidthPx
-        np["viewHeightPx"] = viewHeightPx
-        sendPacket(np)
-    }
-
     fun stopScreenShare() {
+        pendingStreamConfig = null
+        stopStreamDecoder()
         if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["stopScreenShare"] = true
@@ -177,9 +226,20 @@ class MousePadPlugin : Plugin() {
     }
 
     fun switchScreen(viewWidthMm: Float, viewHeightMm: Float, viewWidthPx: Int, viewHeightPx: Int) {
+        stopStreamDecoder()
         if (!device.isReachable) return
         val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["switchScreen"] = true
+        np["viewWidthMm"] = viewWidthMm.toDouble()
+        np["viewHeightMm"] = viewHeightMm.toDouble()
+        np["viewWidthPx"] = viewWidthPx
+        np["viewHeightPx"] = viewHeightPx
+        sendPacket(np)
+    }
+
+    fun sendScreenShareViewport(viewWidthMm: Float, viewHeightMm: Float, viewWidthPx: Int, viewHeightPx: Int) {
+        if (!device.isReachable) return
+        val np = NetworkPacket(PACKET_TYPE_SCREENSHARE)
         np["viewWidthMm"] = viewWidthMm.toDouble()
         np["viewHeightMm"] = viewHeightMm.toDouble()
         np["viewWidthPx"] = viewWidthPx
@@ -258,50 +318,36 @@ class MousePadPlugin : Plugin() {
         }
     }
 
-    fun hasMicPermission(): Boolean {
-        return isPermissionGranted(Manifest.permission.RECORD_AUDIO)
-    }
+    fun hasMicPermission(): Boolean = isPermissionGranted(Manifest.permission.RECORD_AUDIO)
 
     fun sendLeftClick() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["singleclick"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["singleclick"] = true })
     }
 
     fun sendDoubleClick() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["doubleclick"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["doubleclick"] = true })
     }
 
     fun sendMiddleClick() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["middleclick"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["middleclick"] = true })
     }
 
     fun sendRightClick() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["rightclick"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["rightclick"] = true })
     }
 
     fun sendSingleHold() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["singlehold"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["singlehold"] = true })
     }
 
     fun sendSingleRelease() {
         if (!device.isReachable) return
-        val np = NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST)
-        np["singlerelease"] = true
-        sendPacket(np)
+        sendPacket(NetworkPacket(PACKET_TYPE_MOUSEPAD_REQUEST).apply { this["singlerelease"] = true })
     }
 
     fun sendScroll(dx: Double, dy: Double) {
