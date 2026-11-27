@@ -95,7 +95,7 @@ class MousePadPlugin : Plugin() {
             val width = packet.getInt("width", 640)
             val height = packet.getInt("height", 480)
 
-            if (host.isNotEmpty() && port > 0) {
+            if (host.isNotEmpty() && port > 0 && width in 1..4096 && height in 1..4096) {
                 val cfg = StreamConfig(host, port, width, height)
                 pendingStreamConfig = cfg
                 renderSurface?.let { surface ->
